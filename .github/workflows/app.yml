@@ -1,0 +1,75 @@
+name: Football Pulse
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Action to run
+        type: choice
+        default: setup
+        options: [setup, fetch, build]
+  schedule:
+    - cron: '*/10 * * * *'
+permissions:
+  contents: write
+jobs:
+  setup:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'setup'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack project
+        run: |
+          test -f pack.zip || { echo "Upload pack.zip to the repository first"; exit 1; }
+          python3 -m zipfile -e pack.zip .
+          rm pack.zip
+          sed -i "s#YOUR_GITHUB_USERNAME/the-football-pulse#${{ github.repository }}#" www/index.html
+          git config user.name bot
+          git config user.email bot@users.noreply.github.com
+          git add -A
+          git commit -m "Install The Football Pulse"
+          git push
+  fetch:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'fetch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch news, commit, notify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          [ -f scripts/fetch.js ] || { echo "Run setup first"; exit 0; }
+          npm install --no-save firebase-admin
+          node scripts/fetch.js
+          git config user.name bot
+          git config user.email bot@users.noreply.github.com
+          git add data
+          git diff --cached --quiet || (git commit -m "update posts" && git pull --rebase && git push)
+          node scripts/push.js
+  build:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'build'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: test -f package.json || { echo "Run setup first"; exit 1; }
+      - uses: actions/setup-node@v4
+        with: {node-version: 20}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: 17}
+      - run: npm install
+      - run: npx cap add android
+      - run: npx capacitor-assets generate --android --iconBackgroundColor '#0a0a0a' --splashBackgroundColor '#0a0a0a'
+        continue-on-error: true
+      - name: Firebase config
+        env: {GSJ: '${{ secrets.GOOGLE_SERVICES_JSON }}'}
+        run: |
+          printf '%s' "$GSJ" > android/app/google-services.json
+          test -s android/app/google-services.json || { echo "Secret GOOGLE_SERVICES_JSON is missing"; exit 1; }
+      - run: npx cap sync android
+      - run: cd android && ./gradlew assembleDebug
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: The Football Pulse APK ${{ github.run_number }}
+          files: android/app/build/outputs/apk/debug/app-debug.apk
+          
